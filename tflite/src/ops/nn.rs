@@ -77,25 +77,27 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     ensure!(weights.rank() == 2);
     ensure!(bias.rank() == 1);
     let mut inputs: TVec<OutletId> = op.inputs.into();
+    let mut fc_input = input.clone();
 
-    // Minimal compatibility fix:
-    // TFLite FC can appear with rank > 2 input. Tract FC path below expects BI.
-    // Collapse all leading dims into a single B, keep last dim as I.
-    if input.rank() > 2 {
-        let input_rank = input.rank();
-        let batch_dims: TVec<TDim> = input.shape[..input_rank - 1].iter().cloned().collect();
-        let flat_batch: TDim = (0..input_rank - 1).map(|i| &input.shape[i]).product();
-        let flattened = op.ctx.target.wire_node(
-            format!("{}.flatten_fc_batch", op.prefix),
-            AxisOp::Reshape(0, batch_dims, tvec!(flat_batch)),
+    // TFLite FC often receives rank>2 input and flattens all non-batch dims.
+    // Convert [B, d1, d2, ...] -> [B, d1*d2*...]
+    if fc_input.rank() > 2 {
+        let from: TVec<TDim> = fc_input.shape[1..].iter().cloned().collect();
+        let to: TDim = fc_input.shape[1..].iter().product();
+        let reshaped = op.ctx.target.wire_node(
+            format!("{}.flatten_for_fc", op.prefix),
+            AxisOp::Reshape(1, from, tvec!(to)),
             &inputs[0..1],
         )?[0];
-        inputs[0] = flattened;
+        inputs[0] = reshaped;
+        fc_input = op.ctx.target.outlet_fact(reshaped)?.clone();
     }
 
-    let wires = if input.datum_type.is_float() {
+    ensure!(fc_input.rank() == 2);
+
+    let wires = if fc_input.datum_type.is_float() {
         let axes = "BI,OI->BO".parse()?;
-        let einsum = EinSum { axes, q_params: None, operating_dt: input.datum_type };
+        let einsum = EinSum { axes, q_params: None, operating_dt: fc_input.datum_type };
         let mut wires = op.ctx.target.wire_node(op.prefix, einsum, &inputs[0..2])?;
         if inputs.len() == 3 {
             let bias = op.ctx.target.wire_node(
@@ -111,7 +113,7 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
         }
         wires
     } else {
-        let qp = super::linearops_quantization_suport(op, &input, &mut inputs)?;
+        let qp = super::linearops_quantization_suport(op, &fc_input, &mut inputs)?;
         let axes = "BI,OI,O,,,,,,->BO".parse()?;
         let einsum = EinSum { axes, q_params: qp, operating_dt: i32::datum_type() };
         op.ctx.target.wire_node(op.prefix, einsum, &inputs)?
