@@ -73,10 +73,26 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     let options = builtin!(op, builtin_options_as_fully_connected_options);
     ensure!(options.weights_format() == FullyConnectedOptionsWeightsFormat::DEFAULT);
     ensure!(!options.asymmetric_quantize_inputs());
-    ensure!(input.rank() == 2);
+    // ensure!(input.rank() == 2);
     ensure!(weights.rank() == 2);
     ensure!(bias.rank() == 1);
     let mut inputs: TVec<OutletId> = op.inputs.into();
+
+    // Minimal compatibility fix:
+    // TFLite FC can appear with rank > 2 input. Tract FC path below expects BI.
+    // Collapse all leading dims into a single B, keep last dim as I.
+    if input.rank() > 2 {
+        let input_rank = input.rank();
+        let batch_dims: TVec<TDim> = input.shape[..input_rank - 1].iter().cloned().collect();
+        let flat_batch: TDim = (0..input_rank - 1).map(|i| &input.shape[i]).product();
+        let flattened = op.ctx.target.wire_node(
+            format!("{}.flatten_fc_batch", op.prefix),
+            AxisOp::Reshape(0, batch_dims, tvec!(flat_batch)),
+            &inputs[0..1],
+        )?[0];
+        inputs[0] = flattened;
+    }
+
     let wires = if input.datum_type.is_float() {
         let axes = "BI,OI->BO".parse()?;
         let einsum = EinSum { axes, q_params: None, operating_dt: input.datum_type };
