@@ -73,14 +73,13 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     let options = builtin!(op, builtin_options_as_fully_connected_options);
     ensure!(options.weights_format() == FullyConnectedOptionsWeightsFormat::DEFAULT);
     ensure!(!options.asymmetric_quantize_inputs());
-    // ensure!(input.rank() == 2);
     ensure!(weights.rank() == 2);
     ensure!(bias.rank() == 1);
+
     let mut inputs: TVec<OutletId> = op.inputs.into();
     let mut fc_input = input.clone();
 
-    // TFLite FC often receives rank>2 input and flattens all non-batch dims.
-    // Convert [B, d1, d2, ...] -> [B, d1*d2*...]
+    // TFLite FC semantics: flatten all NON-batch dims => [B, I].
     if fc_input.rank() > 2 {
         let from: TVec<TDim> = fc_input.shape[1..].iter().cloned().collect();
         let to: TDim = fc_input.shape[1..].iter().product();
@@ -92,12 +91,15 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
         inputs[0] = reshaped;
         fc_input = op.ctx.target.outlet_fact(reshaped)?.clone();
     }
-
     ensure!(fc_input.rank() == 2);
 
     let wires = if fc_input.datum_type.is_float() {
         let axes = "BI,OI->BO".parse()?;
-        let einsum = EinSum { axes, q_params: None, operating_dt: fc_input.datum_type };
+        let einsum = EinSum {
+            axes,
+            q_params: None,
+            operating_dt: fc_input.datum_type,
+        };
         let mut wires = op.ctx.target.wire_node(op.prefix, einsum, &inputs[0..2])?;
         if inputs.len() == 3 {
             let bias = op.ctx.target.wire_node(
@@ -114,10 +116,52 @@ fn de_fully_connected(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
         wires
     } else {
         let qp = super::linearops_quantization_suport(op, &fc_input, &mut inputs)?;
-        let axes = "BI,OI,O,,,,,,->BO".parse()?;
-        let einsum = EinSum { axes, q_params: qp, operating_dt: i32::datum_type() };
-        op.ctx.target.wire_node(op.prefix, einsum, &inputs)?
+        if qp.is_some() {
+            // inputs are:
+            // 0 BI, 1 OI, 2 O, 3 i0, 4 iscale, 5 k0, 6 kscale, 7 c0, 8 cscale
+            let in_count = inputs.len();
+
+            let mut o_axis = Axis::new('O', in_count, 1)
+                .input(1, 0) // weights O
+                .input(2, 0) // bias O
+                .output(0, 1);
+
+            // Per-channel quantization may make k0/kscale rank-1 on O.
+            if op.ctx.target.outlet_fact(inputs[5])?.rank() == 1 {
+                o_axis = o_axis.input(5, 0);
+            }
+            if op.ctx.target.outlet_fact(inputs[6])?.rank() == 1 {
+                o_axis = o_axis.input(6, 0);
+            }
+
+            let axes = AxesMapping::new(
+                in_count,
+                1,
+                tvec!(
+                    Axis::new('B', in_count, 1).input(0, 0).output(0, 0),
+                    Axis::new('I', in_count, 1).input(0, 1).input(1, 1),
+                    o_axis
+                ),
+            )?;
+
+            let einsum = EinSum {
+                axes,
+                q_params: qp,
+                operating_dt: i32::datum_type(),
+            };
+            op.ctx.target.wire_node(op.prefix, einsum, &inputs)?
+        } else {
+            // Integer path without quant metadata.
+            let axes = "BI,OI,O->BO".parse()?;
+            let einsum = EinSum {
+                axes,
+                q_params: None,
+                operating_dt: i32::datum_type(),
+            };
+            op.ctx.target.wire_node(op.prefix, einsum, &inputs[0..3])?
+        }
     };
+
     super::wire_fused_activation(op, &wires, &options.fused_activation_function())
 }
 
