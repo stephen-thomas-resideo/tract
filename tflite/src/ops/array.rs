@@ -10,8 +10,9 @@ use crate::ser::{BuiltinOp, SubgraphBuilder};
 use crate::tflite::{
     ActivationFunctionType, BuiltinOperator, BuiltinOptions, ConcatenationOptions,
     ConcatenationOptionsArgs, ExpandDimsOptions, ExpandDimsOptionsArgs, ReshapeOptions,
-    ReshapeOptionsArgs, SliceOptions, SliceOptionsArgs, SqueezeOptions, SqueezeOptionsArgs,
-    StridedSliceOptions, StridedSliceOptionsArgs, TransposeOptions, TransposeOptionsArgs,
+    ReshapeOptionsArgs, SliceOptions, SliceOptionsArgs,
+    SqueezeOptions, SqueezeOptionsArgs, StridedSliceOptions, StridedSliceOptionsArgs,
+    TransposeOptions, TransposeOptionsArgs,
 };
 
 use super::wire_fused_activation;
@@ -26,6 +27,7 @@ pub fn register_all(reg: &mut Registry) {
     reg.reg_to_tract(BuiltinOperator::BROADCAST_TO, de_broadcast_to);
     reg.reg_to_tract(BuiltinOperator::CONCATENATION, de_concat);
     reg.reg_to_tract(BuiltinOperator::EXPAND_DIMS, de_expand_dims);
+    reg.reg_to_tract(BuiltinOperator::PACK, de_pack);
     reg.reg_to_tract(BuiltinOperator::PAD, de_pad);
     reg.reg_to_tract(BuiltinOperator::PADV2, de_padv2);
     reg.reg_to_tract(BuiltinOperator::RESHAPE, de_reshape);
@@ -65,6 +67,24 @@ fn de_expand_dims(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
             op.ctx.target.wire_node(format!("{prefix}.{ix}"), AxisOp::Add(axis as usize), &wire)?;
     }
     Ok(wire)
+}
+
+fn de_pack(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
+    let options = builtin!(op, builtin_options_as_pack_options);
+    let rank = op.facts()?[0].rank();
+    let axis = if options.axis() < 0 { rank as i32 + options.axis() } else { options.axis() } as usize;
+    let prefix = op.prefix;
+    // Expand each input along the new axis, then concatenate.
+    let mut expanded: TVec<OutletId> = tvec![];
+    for (ix, &input) in op.inputs.iter().enumerate() {
+        let wire = op.ctx.target.wire_node(
+            format!("{prefix}.expand.{ix}"),
+            AxisOp::Add(axis),
+            &[input],
+        )?;
+        expanded.push(wire[0]);
+    }
+    op.ctx.target.wire_node(prefix, TypedConcat::new(axis), &expanded)
 }
 
 fn de_pad(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
