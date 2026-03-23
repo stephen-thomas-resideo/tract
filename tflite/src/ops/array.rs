@@ -147,7 +147,7 @@ fn de_squeeze(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
 
 fn de_strided_slice(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     let options = builtin!(op, builtin_options_as_strided_slice_options);
-    ensure!(options.new_axis_mask() == 0 && options.shrink_axis_mask() == 0);
+    ensure!(options.new_axis_mask() == 0);
     let slice = tract_core::ops::array::StridedSlice {
         begin_mask: options.begin_mask() as _,
         end_mask: options.end_mask() as _,
