@@ -112,26 +112,29 @@ fn de_padv2(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
 
 fn de_reshape(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     let input_shape: TVec<TDim> = op.ctx.target.outlet_fact(op.inputs[0])?.shape.to_tvec();
-    let options = builtin!(op, builtin_options_as_reshape_options);
-    let shape_from_options = || -> TractResult<Arc<Tensor>> {
-        let new_shape = options
-            .new_shape()
-            .as_ref()
-            .context("Missing RESHAPE builtin new_shape")?
-            .iter()
-            .collect::<Vec<i32>>();
-        Ok(rctensor1(&new_shape))
+    let shape_from_options = || -> TractResult<Option<Arc<Tensor>>> {
+        let Some(options) = op.flat.builtin_options_as_reshape_options() else {
+            return Ok(None);
+        };
+        let option_shape = options.new_shape();
+        let Some(new_shape) = option_shape.as_ref() else {
+            return Ok(None);
+        };
+        let new_shape = new_shape.iter().collect::<Vec<i32>>();
+        Ok(Some(rctensor1(&new_shape)))
     };
     let shape = if let Some(outlet) = op.inputs.get(1) {
         if let Some(shape) = op.ctx.target.outlet_fact(*outlet)?.konst.clone() {
             shape
         } else {
-            shape_from_options().context(
+            shape_from_options()?.context(
                 "Dynamic RESHAPE shape input is not supported and builtin new_shape is missing",
             )?
         }
     } else {
-        shape_from_options()?
+        shape_from_options()?.context(
+            "RESHAPE has no shape input tensor and builtin new_shape is missing",
+        )?
     };
     let shape = shape.cast_to::<TDim>()?;
     let shape = shape.as_slice::<TDim>()?;
