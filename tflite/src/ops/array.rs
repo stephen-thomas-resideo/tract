@@ -112,11 +112,26 @@ fn de_padv2(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
 
 fn de_reshape(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
     let input_shape: TVec<TDim> = op.ctx.target.outlet_fact(op.inputs[0])?.shape.to_tvec();
+    let options = builtin!(op, builtin_options_as_reshape_options);
+    let shape_from_options = || -> TractResult<Arc<Tensor>> {
+        let new_shape = options
+            .new_shape()
+            .as_ref()
+            .context("Missing RESHAPE builtin new_shape")?
+            .iter()
+            .collect::<Vec<i32>>();
+        Ok(rctensor1(&new_shape))
+    };
     let shape = if let Some(outlet) = op.inputs.get(1) {
-        op.ctx.target.outlet_fact(*outlet)?.konst.clone().unwrap()
+        if let Some(shape) = op.ctx.target.outlet_fact(*outlet)?.konst.clone() {
+            shape
+        } else {
+            shape_from_options().context(
+                "Dynamic RESHAPE shape input is not supported and builtin new_shape is missing",
+            )?
+        }
     } else {
-        let options = builtin!(op, builtin_options_as_reshape_options);
-        rctensor1(&options.new_shape().as_ref().unwrap().iter().collect::<Vec<i32>>())
+        shape_from_options()?
     };
     let shape = shape.cast_to::<TDim>()?;
     let shape = shape.as_slice::<TDim>()?;
