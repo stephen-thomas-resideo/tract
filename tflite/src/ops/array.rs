@@ -123,24 +123,25 @@ fn de_reshape(op: &mut DeserOp) -> TractResult<TVec<OutletId>> {
         let new_shape = new_shape.iter().collect::<Vec<i32>>();
         Ok(Some(rctensor1(&new_shape)))
     };
-    let shape = if let Some(outlet) = op.inputs.get(1) {
+    let shape: TVec<TDim> = if let Some(outlet) = op.inputs.get(1) {
         if let Some(shape) = op.ctx.target.outlet_fact(*outlet)?.konst.clone() {
-            shape
+            let shape = shape.cast_to::<TDim>()?;
+            shape.as_slice::<TDim>()?.into()
+        } else if let Some(shape) = shape_from_options()? {
+            let shape = shape.cast_to::<TDim>()?;
+            shape.as_slice::<TDim>()?.into()
         } else {
-            shape_from_options()?.context(
-                "Dynamic RESHAPE shape input is not supported and builtin new_shape is missing",
-            )?
+            op.output_facts[0].shape.to_tvec()
         }
+    } else if let Some(shape) = shape_from_options()? {
+        let shape = shape.cast_to::<TDim>()?;
+        shape.as_slice::<TDim>()?.into()
     } else {
-        shape_from_options()?.context(
-            "RESHAPE has no shape input tensor and builtin new_shape is missing",
-        )?
+        op.output_facts[0].shape.to_tvec()
     };
-    let shape = shape.cast_to::<TDim>()?;
-    let shape = shape.as_slice::<TDim>()?;
     let mut wire = tvec!(op.inputs[0]);
     let prefix = op.prefix;
-    for (ix, axis_op) in to_axis_ops_with_tf_rules(&input_shape, shape)?.into_iter().enumerate() {
+    for (ix, axis_op) in to_axis_ops_with_tf_rules(&input_shape, &shape)?.into_iter().enumerate() {
         wire = op.ctx.target.wire_node(format!("{prefix}.{ix}"), axis_op, &wire)?;
     }
     Ok(wire)
